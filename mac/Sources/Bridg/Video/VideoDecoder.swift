@@ -27,7 +27,7 @@ final class VideoDecoder {
 
     /// Feed the codec-config buffer (SPS/PPS) that opens the stream.
     func configure(spsPps: Data) {
-        ingestParameterSets(from: annexBNalUnits(in: spsPps))
+        ingestParameterSets(from: Self.splitNALUnits(in: spsPps))
     }
 
     func reset() {
@@ -39,7 +39,7 @@ final class VideoDecoder {
 
     /// Feed one encoded frame.
     func decode(nalUnits: Data, pts: Int64, isKeyframe: Bool) {
-        let nals = annexBNalUnits(in: nalUnits)
+        let nals = Self.splitNALUnits(in: nalUnits)
 
         // Some encoders repeat SPS/PPS ahead of every keyframe rather than only
         // in the config buffer; pick them up wherever they turn up.
@@ -156,13 +156,36 @@ final class VideoDecoder {
         else { print("Format description failed: \(status)") }
     }
 
-    /// Split an Annex-B buffer on its 3- and 4-byte start codes.
+    /// Split either Annex-B or AVCC H.264 output into NAL units.
     ///
-    /// Replaces a hand-rolled scanner whose inner `start..<(count - 2)` range
-    /// trapped outright on a trailing NAL shorter than 3 bytes.
-    private func annexBNalUnits(in data: Data) -> [Data] {
+    /// Android MediaCodec commonly emits AVCC (4-byte big-endian NAL lengths),
+    /// while some encoders emit Annex-B start codes. Accept both wire formats;
+    /// rejecting AVCC here produces a connected session with a permanently
+    /// black mirror because every frame is silently discarded.
+    static func splitNALUnits(in data: Data) -> [Data] {
         let bytes = [UInt8](data)
         guard bytes.count > 3 else { return [] }
+
+        if bytes.containsSubsequence([0, 0, 1]) {
+            return splitAnnexB(bytes)
+        }
+
+        var avcc: [Data] = []
+        var offset = 0
+        while offset + 4 <= bytes.count {
+            let length = Int(UInt32(bytes[offset]) << 24 |
+                             UInt32(bytes[offset + 1]) << 16 |
+                             UInt32(bytes[offset + 2]) << 8 |
+                             UInt32(bytes[offset + 3]))
+            offset += 4
+            guard length > 0, offset + length <= bytes.count else { return [] }
+            avcc.append(Data(bytes[offset..<(offset + length)]))
+            offset += length
+        }
+        return offset == bytes.count ? avcc : []
+    }
+
+    private static func splitAnnexB(_ bytes: [UInt8]) -> [Data] {
 
         var starts: [(offset: Int, prefix: Int)] = []
         var i = 0
@@ -183,6 +206,15 @@ final class VideoDecoder {
             let end = index + 1 < starts.count ? starts[index + 1].offset : bytes.count
             guard begin < end else { return nil }
             return Data(bytes[begin..<end])
+        }
+    }
+}
+
+private extension Array where Element == UInt8 {
+    func containsSubsequence(_ sequence: [UInt8]) -> Bool {
+        guard !sequence.isEmpty, count >= sequence.count else { return false }
+        return (0...(count - sequence.count)).contains { start in
+            Array(self[start..<(start + sequence.count)]) == sequence
         }
     }
 }

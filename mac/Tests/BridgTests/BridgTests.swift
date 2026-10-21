@@ -85,6 +85,19 @@ final class BridgTests: XCTestCase {
         XCTAssertThrowsError(try buffer.next())
     }
 
+    func testVideoDecoderSplitsLengthPrefixedH264Output() {
+        let first = Data([0x65, 0x01, 0x02])
+        let second = Data([0x41, 0x03])
+        var avcc = Data()
+        for nal in [first, second] {
+            var length = UInt32(nal.count).bigEndian
+            withUnsafeBytes(of: &length) { avcc.append(contentsOf: $0) }
+            avcc.append(nal)
+        }
+
+        XCTAssertEqual(VideoDecoder.splitNALUnits(in: avcc), [first, second])
+    }
+
     // MARK: - Cross-platform crypto
 
     private static let ikmVector = Data((0..<32).map { UInt8($0) })
